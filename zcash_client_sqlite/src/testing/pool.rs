@@ -53,36 +53,36 @@ pub(crate) fn send_single_step_proposed_transfer<T: ShieldedPoolTester>() {
     )
 }
 
-pub(crate) fn subtract_fee_spends_exact_balance<T: ShieldedPoolTester>() {
-    zcash_client_backend::data_api::testing::pool::subtract_fee_spends_exact_balance::<T>(
+pub(crate) fn included_fee_spends_exact_balance<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::included_fee_spends_exact_balance::<T>(
         TestDbFactory::default(),
         BlockCache::new(),
     )
 }
 
-pub(crate) fn subtract_fee_with_ample_funds<T: ShieldedPoolTester>() {
-    zcash_client_backend::data_api::testing::pool::subtract_fee_with_ample_funds::<T>(
+pub(crate) fn included_fee_with_ample_funds<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::included_fee_with_ample_funds::<T>(
         TestDbFactory::default(),
         BlockCache::new(),
     )
 }
 
-pub(crate) fn subtract_fee_rejects_multi_payment_request<T: ShieldedPoolTester>() {
-    zcash_client_backend::data_api::testing::pool::subtract_fee_rejects_multi_payment_request::<T>(
+pub(crate) fn included_fee_rejects_multi_payment_request<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::included_fee_rejects_multi_payment_request::<T>(
         TestDbFactory::default(),
         BlockCache::new(),
     )
 }
 
-pub(crate) fn subtract_fee_rejects_amount_below_fee<T: ShieldedPoolTester>() {
-    zcash_client_backend::data_api::testing::pool::subtract_fee_rejects_amount_below_fee::<T>(
+pub(crate) fn included_fee_rejects_amount_below_fee<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::included_fee_rejects_amount_below_fee::<T>(
         TestDbFactory::default(),
         BlockCache::new(),
     )
 }
 
-pub(crate) fn subtract_fee_propagates_insufficient_funds<T: ShieldedPoolTester>() {
-    zcash_client_backend::data_api::testing::pool::subtract_fee_propagates_insufficient_funds::<T>(
+pub(crate) fn included_fee_propagates_insufficient_funds<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::included_fee_propagates_insufficient_funds::<T>(
         TestDbFactory::default(),
         BlockCache::new(),
     )

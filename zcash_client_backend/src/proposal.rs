@@ -176,26 +176,26 @@ pub enum ProposalError {
     /// The fee required for the transaction equals or exceeds the total amount from
     /// which it would be subtracted, so no positive payment remains.
     ///
-    /// This is returned by [`propose_transfer_subtracting_fee`] when the requested
+    /// This is returned by [`propose_transfer_included_fee`] when the requested
     /// amount cannot cover even the fee for the smallest transaction shape capable
     /// of paying it.
     ///
-    /// [`propose_transfer_subtracting_fee`]:
-    /// crate::data_api::wallet::propose_transfer_subtracting_fee
-    FeeExceedsPayment {
+    /// [`propose_transfer_included_fee`]:
+    /// crate::data_api::wallet::propose_transfer_included_fee
+    FeeExceedsAmount {
         /// The total amount the transaction was permitted to consume (payment plus fee).
         amount: Zatoshis,
         /// The fee that would be required.
         fee_required: Zatoshis,
     },
-    /// Fee subtraction is currently only supported for transaction requests containing
+    /// Included-fee amounts are currently only supported for transaction requests containing
     /// exactly one payment; the wrapped value is the number of payments in the request.
-    FeeSubtractionRequiresSinglePayment(usize),
-    /// Fee subtraction did not converge to a proposal satisfying its balance invariant
+    IncludedFeeRequiresSinglePayment(usize),
+    /// An included-fee amount did not converge to a proposal satisfying its balance
     /// within the internal pass limit. This indicates an oscillating fee as the payment
     /// was adjusted (for example, inputs repeatedly crossing a dust threshold), and is
     /// a defect condition rather than an expected user-facing outcome.
-    FeeSubtractionDidNotConverge {
+    IncludedFeeDidNotConverge {
         /// The total amount the transaction was permitted to consume (payment plus fee).
         amount: Zatoshis,
     },
@@ -345,7 +345,7 @@ impl Display for ProposalError {
                     "; reduce the payment amount or consolidate small notes before retrying."
                 )
             }
-            ProposalError::FeeExceedsPayment {
+            ProposalError::FeeExceedsAmount {
                 amount,
                 fee_required,
             } => write!(
@@ -354,13 +354,13 @@ impl Display for ProposalError {
                 u64::from(*fee_required),
                 u64::from(*amount)
             ),
-            ProposalError::FeeSubtractionRequiresSinglePayment(n) => write!(
+            ProposalError::IncludedFeeRequiresSinglePayment(n) => write!(
                 f,
-                "Fee subtraction is only supported for single-payment transaction requests; the request contained {n} payments."
+                "Included-fee amounts are only supported for single-payment transaction requests; the request contained {n} payments."
             ),
-            ProposalError::FeeSubtractionDidNotConverge { amount } => write!(
+            ProposalError::IncludedFeeDidNotConverge { amount } => write!(
                 f,
-                "Fee subtraction did not converge to a proposal paying within {} zatoshis within the internal pass limit.",
+                "An included-fee amount did not converge to a proposal paying within {} zatoshis within the internal pass limit.",
                 u64::from(*amount)
             ),
         }

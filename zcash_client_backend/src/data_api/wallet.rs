@@ -1102,7 +1102,7 @@ where
 }
 
 /// The maximum number of proposal-construction passes that
-/// [`propose_transfer_subtracting_fee`] will perform before concluding that the payment
+/// [`propose_transfer_included_fee`] will perform before concluding that the payment
 /// adjustment is not converging.
 ///
 /// Each pass sets the payment to the requested amount less the fee observed in the
@@ -1110,7 +1110,7 @@ where
 /// in practice the payment converges within at most three passes; the cap exists as a
 /// guard against pathological wallet states (for example, inputs repeatedly crossing a
 /// dust threshold as the payment changes).
-const FEE_SUBTRACTION_MAX_PASSES: usize = 8;
+const INCLUDED_FEE_MAX_PASSES: usize = 8;
 
 /// Proposes a transfer in which the transaction fee is deducted from the payment
 /// amount, rather than being paid on top of it.
@@ -1148,7 +1148,7 @@ const FEE_SUBTRACTION_MAX_PASSES: usize = 8;
 /// Only transaction requests containing exactly one payment are supported: with more
 /// than one payment it is ambiguous which payment should absorb the fee. An error is
 /// returned for multi-payment requests (see
-/// [`ProposalError::FeeSubtractionRequiresSinglePayment`]).
+/// [`ProposalError::IncludedFeeRequiresSinglePayment`]).
 ///
 /// When `lock_inputs` is `Some(request)`, the inputs selected by the *returned* proposal
 /// are locked under the same semantics as [`propose_transfer`]. Intermediate proposals
@@ -1177,7 +1177,7 @@ const FEE_SUBTRACTION_MAX_PASSES: usize = 8;
 /// * `proposed_version`: The proposed transaction version, as for [`propose_transfer`].
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
-pub fn propose_transfer_subtracting_fee<DbT, ParamsT, InputsT, ChangeT, CommitmentTreeErrT>(
+pub fn propose_transfer_included_fee<DbT, ParamsT, InputsT, ChangeT, CommitmentTreeErrT>(
     wallet_db: &mut DbT,
     params: &ParamsT,
     spend_from_account: <DbT as InputSource>::AccountId,
@@ -1199,13 +1199,13 @@ where
     InputsT: InputSelector<InputSource = DbT>,
     ChangeT: ChangeStrategy<MetaSource = DbT>,
 {
-    // Fee subtraction is only defined for a single-payment request: with more than one
+    // An included-fee amount is only defined for a single-payment request: with more than one
     // payment it is ambiguous which payment should absorb the fee.
     let source_payment = match request.payments().iter().collect::<Vec<_>>()[..] {
         [(_, payment)] => payment,
         _ => {
             return Err(Error::Proposal(
-                ProposalError::FeeSubtractionRequiresSinglePayment(request.payments().len()),
+                ProposalError::IncludedFeeRequiresSinglePayment(request.payments().len()),
             ))
         }
     };
@@ -1226,7 +1226,7 @@ where
     // found so far is returned instead.
     let mut seen: Vec<u64> = vec![gross];
 
-    for _pass in 0..FEE_SUBTRACTION_MAX_PASSES {
+    for _pass in 0..INCLUDED_FEE_MAX_PASSES {
         let payment_zats = Zatoshis::from_u64(payment)
             .map_err(|_| Error::Proposal(ProposalError::RequestTotalInvalid))?;
         let request_payment = Payment::new(
@@ -1292,7 +1292,7 @@ where
                     if fee >= gross {
                         // The fee consumes the entire requested total; no positive
                         // payment remains.
-                        return Err(Error::Proposal(ProposalError::FeeExceedsPayment {
+                        return Err(Error::Proposal(ProposalError::FeeExceedsAmount {
                             amount: Zatoshis::from_u64(gross)
                                 .expect("gross was converted from a valid Zatoshis"),
                             fee_required: Zatoshis::from_u64(fee)
@@ -1329,7 +1329,7 @@ where
                     if fee >= gross {
                         // The fee consumes the entire requested total; no positive
                         // payment remains.
-                        return Err(Error::Proposal(ProposalError::FeeExceedsPayment {
+                        return Err(Error::Proposal(ProposalError::FeeExceedsAmount {
                             amount: Zatoshis::from_u64(gross)
                                 .expect("gross was converted from a valid Zatoshis"),
                             fee_required: Zatoshis::from_u64(fee)
@@ -1359,7 +1359,7 @@ where
     let proposal = match best {
         Some(proposal) => proposal,
         None => {
-            return Err(Error::Proposal(ProposalError::FeeSubtractionDidNotConverge {
+            return Err(Error::Proposal(ProposalError::IncludedFeeDidNotConverge {
                 amount: Zatoshis::from_u64(gross)
                     .expect("gross was converted from a valid Zatoshis"),
             }))

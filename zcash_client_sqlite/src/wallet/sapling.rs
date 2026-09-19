@@ -466,28 +466,28 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn subtract_fee_spends_exact_balance() {
-        testing::pool::subtract_fee_spends_exact_balance::<SaplingPoolTester>()
+    fn included_fee_spends_exact_balance() {
+        testing::pool::included_fee_spends_exact_balance::<SaplingPoolTester>()
     }
 
     #[test]
-    fn subtract_fee_with_ample_funds() {
-        testing::pool::subtract_fee_with_ample_funds::<SaplingPoolTester>()
+    fn included_fee_with_ample_funds() {
+        testing::pool::included_fee_with_ample_funds::<SaplingPoolTester>()
     }
 
     #[test]
-    fn subtract_fee_rejects_multi_payment_request() {
-        testing::pool::subtract_fee_rejects_multi_payment_request::<SaplingPoolTester>()
+    fn included_fee_rejects_multi_payment_request() {
+        testing::pool::included_fee_rejects_multi_payment_request::<SaplingPoolTester>()
     }
 
     #[test]
-    fn subtract_fee_rejects_amount_below_fee() {
-        testing::pool::subtract_fee_rejects_amount_below_fee::<SaplingPoolTester>()
+    fn included_fee_rejects_amount_below_fee() {
+        testing::pool::included_fee_rejects_amount_below_fee::<SaplingPoolTester>()
     }
 
     #[test]
-    fn subtract_fee_propagates_insufficient_funds() {
-        testing::pool::subtract_fee_propagates_insufficient_funds::<SaplingPoolTester>()
+    fn included_fee_propagates_insufficient_funds() {
+        testing::pool::included_fee_propagates_insufficient_funds::<SaplingPoolTester>()
     }
 
     #[test]

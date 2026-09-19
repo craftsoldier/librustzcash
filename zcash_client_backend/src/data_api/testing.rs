@@ -98,7 +98,7 @@ use super::{
             GreedyInputSelector, InputSelector, LockFilter, LockedInputPolicy, SpendPolicy,
         },
         propose_send_max_transfer, propose_standard_transfer_to_address, propose_transfer,
-        propose_transfer_subtracting_fee,
+        propose_transfer_included_fee,
     },
 };
 
@@ -1253,9 +1253,9 @@ where
         )
     }
 
-    /// Invokes [`propose_transfer_subtracting_fee`] with the given arguments.
+    /// Invokes [`propose_transfer_included_fee`] with the given arguments.
     #[allow(clippy::type_complexity)]
-    pub fn propose_transfer_subtracting_fee<InputsT, ChangeT>(
+    pub fn propose_transfer_included_fee<InputsT, ChangeT>(
         &mut self,
         spend_from_account: <DbT as InputSource>::AccountId,
         input_selector: &InputsT,
@@ -1271,7 +1271,7 @@ where
         ChangeT: ChangeStrategy<MetaSource = DbT>,
     {
         let network = self.network().clone();
-        propose_transfer_subtracting_fee::<_, _, _, _, Infallible>(
+        propose_transfer_included_fee::<_, _, _, _, Infallible>(
             self.wallet_mut(),
             &network,
             spend_from_account,

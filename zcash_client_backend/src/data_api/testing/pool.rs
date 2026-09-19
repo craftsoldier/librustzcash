@@ -400,11 +400,11 @@ pub fn send_single_step_proposed_transfer<T: ShieldedPoolTester>(
 /// the payment, converges to a proposal that consumes exactly the requested total —
 /// even though the wallet cannot cover the full amount *plus* the fee.
 ///
-/// This is the flagship case for fee-subtracted proposals: the wallet holds a single
+/// This is the flagship case for included-fee proposals: the wallet holds a single
 /// note worth the entire requested amount, so the first pass (at the full amount as
 /// the payment) cannot be funded, and the fee must be recovered from the resulting
 /// `InsufficientFunds` error and subtracted.
-pub fn subtract_fee_spends_exact_balance<T: ShieldedPoolTester>(
+pub fn included_fee_spends_exact_balance<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
@@ -434,7 +434,7 @@ pub fn subtract_fee_spends_exact_balance<T: ShieldedPoolTester>(
 
     let account = st.test_account().cloned().unwrap();
     let proposal = st
-        .propose_transfer_subtracting_fee(
+        .propose_transfer_included_fee(
             account.id(),
             &input_selector,
             &change_strategy,
@@ -458,9 +458,9 @@ pub fn subtract_fee_spends_exact_balance<T: ShieldedPoolTester>(
     st.create_proposed_expecting(&proposal, 1);
 }
 
-/// With ample funds available, a fee-subtracted payment converges to the exact
+/// With ample funds available, an included-fee payment converges to the exact
 /// invariant, with the unspent remainder returned to the wallet as change.
-pub fn subtract_fee_with_ample_funds<T: ShieldedPoolTester>(
+pub fn included_fee_with_ample_funds<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
@@ -489,7 +489,7 @@ pub fn subtract_fee_with_ample_funds<T: ShieldedPoolTester>(
 
     let account = st.test_account().cloned().unwrap();
     let proposal = st
-        .propose_transfer_subtracting_fee(
+        .propose_transfer_included_fee(
             account.id(),
             &input_selector,
             &change_strategy,
@@ -515,9 +515,9 @@ pub fn subtract_fee_with_ample_funds<T: ShieldedPoolTester>(
     st.create_proposed_expecting(&proposal, 1);
 }
 
-/// Fee subtraction is only defined for single-payment requests; a multi-payment
+/// Included-fee amounts are only defined for single-payment requests; a multi-payment
 /// request is rejected rather than guessing which payment should absorb the fee.
-pub fn subtract_fee_rejects_multi_payment_request<T: ShieldedPoolTester>(
+pub fn included_fee_rejects_multi_payment_request<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
@@ -540,7 +540,7 @@ pub fn subtract_fee_rejects_multi_payment_request<T: ShieldedPoolTester>(
     let input_selector = GreedyInputSelector::new();
 
     let account = st.test_account().cloned().unwrap();
-    let result = st.propose_transfer_subtracting_fee(
+    let result = st.propose_transfer_included_fee(
         account.id(),
         &input_selector,
         &change_strategy,
@@ -551,14 +551,14 @@ pub fn subtract_fee_rejects_multi_payment_request<T: ShieldedPoolTester>(
     assert_matches!(
         result,
         Err(Error::Proposal(
-            crate::proposal::ProposalError::FeeSubtractionRequiresSinglePayment(2)
+            crate::proposal::ProposalError::IncludedFeeRequiresSinglePayment(2)
         ))
     );
 }
 
 /// A requested total smaller than the fee even for the smallest transaction shape is
 /// rejected: no positive payment remains after the fee is subtracted.
-pub fn subtract_fee_rejects_amount_below_fee<T: ShieldedPoolTester>(
+pub fn included_fee_rejects_amount_below_fee<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
@@ -584,7 +584,7 @@ pub fn subtract_fee_rejects_amount_below_fee<T: ShieldedPoolTester>(
     let input_selector = GreedyInputSelector::new();
 
     let account = st.test_account().cloned().unwrap();
-    let result = st.propose_transfer_subtracting_fee(
+    let result = st.propose_transfer_included_fee(
         account.id(),
         &input_selector,
         &change_strategy,
@@ -595,7 +595,7 @@ pub fn subtract_fee_rejects_amount_below_fee<T: ShieldedPoolTester>(
     assert_matches!(
         result,
         Err(Error::Proposal(
-            crate::proposal::ProposalError::FeeExceedsPayment { .. }
+            crate::proposal::ProposalError::FeeExceedsAmount { .. }
         ))
     );
 }
@@ -603,7 +603,7 @@ pub fn subtract_fee_rejects_amount_below_fee<T: ShieldedPoolTester>(
 /// A requested total exceeding the wallet's entire spendable balance propagates the
 /// underlying `InsufficientFunds` error rather than being misreported as a fee
 /// problem.
-pub fn subtract_fee_propagates_insufficient_funds<T: ShieldedPoolTester>(
+pub fn included_fee_propagates_insufficient_funds<T: ShieldedPoolTester>(
     dsf: impl DataStoreFactory,
     cache: impl TestCache,
 ) {
@@ -627,7 +627,7 @@ pub fn subtract_fee_propagates_insufficient_funds<T: ShieldedPoolTester>(
     let input_selector = GreedyInputSelector::new();
 
     let account = st.test_account().cloned().unwrap();
-    let result = st.propose_transfer_subtracting_fee(
+    let result = st.propose_transfer_included_fee(
         account.id(),
         &input_selector,
         &change_strategy,
