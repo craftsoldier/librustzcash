@@ -1145,6 +1145,27 @@ const INCLUDED_FEE_MAX_PASSES: usize = 8;
 /// and `amount` simply remains unspent in the wallet. The transaction never consumes
 /// more than `amount` in total.
 ///
+/// For requests that produce multi-step proposals — for example, payments to TEX
+/// addresses under ZIP 320 — the fee is the sum of the fees of all steps of the
+/// proposal, and the invariant is evaluated against that total: the requested
+/// amount covers every transaction in the series, and the payment is reduced until
+/// the series as a whole consumes exactly that amount.
+///
+/// ZIP 318 canonical crossings are evaluated against the *adjusted* payment, on
+/// each pass: [`propose_transfer`] attempts a canonical crossing whenever the
+/// request it is given carries a single payment of a canonical denomination, and
+/// each pass supplies the adjusted payment as that request. A request whose total
+/// is a canonical denomination will therefore usually not produce a canonical
+/// crossing once the fee has been deducted, unless the adjusted payment is itself
+/// a canonical denomination. This is deliberate: canonicality is a property of the
+/// transaction actually constructed, not of the amount the user typed.
+///
+/// When the invariant cannot be satisfied exactly, the returned proposal consumes
+/// strictly less than the requested amount, and the unspent residual is simply
+/// never selected as an input. The caller can determine the residual as
+/// `amount - payment - fee`, read from the returned proposal's transaction request
+/// and balance.
+///
 /// Only transaction requests containing exactly one payment are supported: with more
 /// than one payment it is ambiguous which payment should absorb the fee. An error is
 /// returned for multi-payment requests (see

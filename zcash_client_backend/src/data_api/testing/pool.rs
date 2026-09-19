@@ -638,6 +638,237 @@ pub fn included_fee_propagates_insufficient_funds<T: ShieldedPoolTester>(
     assert_matches!(result, Err(Error::InsufficientFunds { .. }));
 }
 
+/// A fee-inclusive payment converges to the exact invariant when the change strategy
+/// splits change across multiple outputs.
+///
+/// Split change is the highest-risk configuration for the convergence loop: adjusting
+/// the payment changes the change value, which can change the number of change outputs
+/// the strategy proposes, which changes the logical action count, which changes the fee
+/// that the next pass subtracts. This scenario sweeps a range of requested totals across
+/// those shape boundaries and verifies that the loop converges to the exact invariant
+/// for every one, never proposing a transaction that would over-consume the request.
+pub fn included_fee_multi_output_change_sweep<T: ShieldedPoolTester>(
+    dsf: impl DataStoreFactory,
+    cache: impl TestCache,
+) {
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+
+    // A single note well above every requested total in the sweep, so that change is
+    // always produced and the split policy is exercised. Because wallet metadata for
+    // the split policy is computed excluding the selected inputs, spending this note
+    // leaves the account with no other spendable notes and so the policy targets a
+    // two-way split of the change.
+    st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(100000));
+
+    let to: Address = T::sk_default_address(&T::sk(&[0xf5; 32]));
+
+    // Split change into two outputs whenever at least 2 * 20000 zatoshis of change
+    // is produced.
+    let split_policy = SplitPolicy::with_min_output_value(
+        NonZeroUsize::new(2).expect("2 is nonzero"),
+        Zatoshis::const_from_u64(20000),
+    );
+    let change_strategy = crate::fees::zip317::MultiOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        None,
+        T::SHIELDED_PROTOCOL,
+        DustOutputPolicy::default(),
+        split_policy,
+    );
+    let input_selector = GreedyInputSelector::new();
+    let account = st.test_account().cloned().unwrap();
+
+    // Sweep a range of requested totals so that the convergence passes repeatedly cross
+    // fee-shape boundaries (change output count and action count) as the payment is
+    // adjusted.
+    for gross_u64 in (25000..=95000u64).step_by(5000) {
+        let gross = Zatoshis::const_from_u64(gross_u64);
+        let request = TransactionRequest::new(vec![Payment::without_memo(
+            to.to_zcash_address(st.network()),
+            gross,
+        )])
+        .unwrap();
+
+        let proposal = st
+            .propose_transfer_included_fee(
+                account.id(),
+                &input_selector,
+                &change_strategy,
+                request,
+                ConfirmationsPolicy::MIN,
+            )
+            .unwrap_or_else(|e| panic!("gross {gross_u64}: {e:?}"));
+
+        let step = proposal.steps().first();
+        let payment = step
+            .transaction_request()
+            .total()
+            .unwrap()
+            .expect("the adjusted payment amount is present");
+        let fee = step.balance().fee_required();
+
+        // Safety invariant: the transaction never consumes more than the requested
+        // total.
+        assert!(
+            payment + fee <= Some(gross),
+            "gross {gross_u64}: payment {payment:?} + fee {fee:?} over-consumes the request"
+        );
+        assert!(u64::from(payment) > 0, "gross {gross_u64}: empty payment");
+
+        // Exactness: the loop converged to payment + fee == gross despite the change
+        // split count varying across passes.
+        assert_eq!(
+            payment + fee,
+            Some(gross),
+            "gross {gross_u64}: payment {payment:?} + fee {fee:?} did not converge exactly"
+        );
+    }
+
+    // The final proposal of the sweep (the largest) is executable end to end. This
+    // guards against a proposal that satisfies the balance invariant but cannot be
+    // built.
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(st.network()),
+        Zatoshis::const_from_u64(95000),
+    )])
+    .unwrap();
+    let proposal = st
+        .propose_transfer_included_fee(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+    st.create_proposed_expecting(&proposal, 1);
+}
+
+/// A fee-inclusive payment to a transparent recipient from shielded funds converges to
+/// the exact invariant in a single-step proposal.
+#[cfg(feature = "transparent-inputs")]
+pub fn included_fee_to_transparent_recipient<T: ShieldedPoolTester>(
+    dsf: impl DataStoreFactory,
+    cache: impl TestCache,
+) {
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+
+    // Fund the wallet with a single note and request its entire value as the total.
+    let value = Zatoshis::const_from_u64(60000);
+    st.add_a_single_note_checking_balance(value);
+
+    let account = st.test_account().cloned().unwrap();
+    let to: Address = Address::Transparent(TransparentAddress::PublicKeyHash([0x7f; 20]));
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(st.network()),
+        value,
+    )])
+    .unwrap();
+
+    let change_strategy = standard::SingleOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        None,
+        T::SHIELDED_PROTOCOL,
+        DustOutputPolicy::default(),
+    );
+    let input_selector = GreedyInputSelector::new();
+
+    let proposal = st
+        .propose_transfer_included_fee(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+
+    // The proposed transaction carries one shielded spend (padded to two shielded
+    // outputs) and one transparent output. The change value is exactly zero, which the
+    // change strategy represents as a zero-valued shielded change output rather than
+    // no change output (so that an observer cannot distinguish this transaction from
+    // one that produced change); it consumes no value, so the invariant is unaffected.
+    let expected_fee = (zip317::MARGINAL_FEE * 3u64).unwrap();
+    let expected_payment = (value - expected_fee).unwrap();
+
+    let steps: Vec<_> = proposal.steps().iter().cloned().collect();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].balance().fee_required(), expected_fee);
+    assert_eq!(
+        steps[0].balance().proposed_change(),
+        [ChangeValue::shielded(T::SHIELDED_PROTOCOL, Zatoshis::ZERO, None)]
+    );
+    assert_matches!(
+        steps[0].transaction_request().payments().get(&0),
+        Some(payment) if payment.amount() == Some(expected_payment)
+    );
+    assert_eq!(expected_payment + expected_fee, Some(value));
+
+    st.create_proposed_expecting(&proposal, 1);
+}
+
+/// A fee-inclusive payment to a TEX address from shielded funds converges to the exact
+/// invariant across a two-step ZIP 320 proposal: the fees of *both* steps are summed
+/// and deducted from the payment, so the series consumes exactly the requested total.
+#[cfg(feature = "transparent-inputs")]
+pub fn included_fee_to_tex_recipient<T: ShieldedPoolTester>(
+    dsf: impl DataStoreFactory,
+    cache: impl TestCache,
+) {
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+
+    let value = Zatoshis::const_from_u64(60000);
+    st.add_a_single_note_checking_balance(value);
+
+    let account = st.test_account().cloned().unwrap();
+    let tex_addr = Address::Tex([0x4; 20]);
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        tex_addr.to_zcash_address(st.network()),
+        value,
+    )])
+    .unwrap();
+
+    let change_strategy = standard::SingleOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        None,
+        T::SHIELDED_PROTOCOL,
+        DustOutputPolicy::default(),
+    );
+    let input_selector = GreedyInputSelector::new();
+
+    let proposal = st
+        .propose_transfer_included_fee(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+
+    // ZIP 320 pair: step 0 spends the shielded note to an ephemeral transparent output;
+    // step 1 spends the ephemeral output to the TEX recipient.
+    let expected_step0_fee = (zip317::MARGINAL_FEE * 3u64).unwrap();
+    let expected_step1_fee = zip317::MINIMUM_FEE;
+    let total_fee = (expected_step0_fee + expected_step1_fee).unwrap();
+    let expected_payment = (value - total_fee).unwrap();
+
+    let steps: Vec<_> = proposal.steps().iter().cloned().collect();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0].balance().fee_required(), expected_step0_fee);
+    assert_eq!(steps[1].balance().fee_required(), expected_step1_fee);
+
+    // The fee-inclusive payment lives in the second step's request.
+    assert_matches!(
+        steps[1].transaction_request().payments().get(&0),
+        Some(payment) if payment.amount() == Some(expected_payment)
+    );
+    assert_eq!(expected_payment + total_fee, Some(value));
+
+    // Both transactions of the pair are created.
+    st.create_proposed_expecting(&proposal, 2);
+}
+
 /// Builds a real transaction via the proposal/creation path, assembles it into a full
 /// block, and verifies that [`decrypt_block`] followed by [`scan_block`] detects the
 /// wallet output (the change note) that it contains.

@@ -88,6 +88,29 @@ pub(crate) fn included_fee_propagates_insufficient_funds<T: ShieldedPoolTester>(
     )
 }
 
+pub(crate) fn included_fee_multi_output_change_sweep<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::included_fee_multi_output_change_sweep::<T>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn included_fee_to_transparent_recipient<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::included_fee_to_transparent_recipient::<T>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
+#[cfg(feature = "transparent-inputs")]
+pub(crate) fn included_fee_to_tex_recipient<T: ShieldedPoolTester>() {
+    zcash_client_backend::data_api::testing::pool::included_fee_to_tex_recipient::<T>(
+        TestDbFactory::default(),
+        BlockCache::new(),
+    )
+}
+
 pub(crate) fn create_to_address_respects_recipient_expiry<T: ShieldedPoolTester>() {
     zcash_client_backend::data_api::testing::pool::create_to_address_respects_recipient_expiry::<T>(
         TestDbFactory::default(),

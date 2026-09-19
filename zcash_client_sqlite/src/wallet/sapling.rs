@@ -491,6 +491,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn included_fee_multi_output_change_sweep() {
+        testing::pool::included_fee_multi_output_change_sweep::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-inputs")]
+    fn included_fee_to_transparent_recipient() {
+        testing::pool::included_fee_to_transparent_recipient::<SaplingPoolTester>()
+    }
+
+    #[test]
+    #[cfg(feature = "transparent-inputs")]
+    fn included_fee_to_tex_recipient() {
+        testing::pool::included_fee_to_tex_recipient::<SaplingPoolTester>()
+    }
+
+    #[test]
     fn create_to_address_respects_recipient_expiry() {
         testing::pool::create_to_address_respects_recipient_expiry::<SaplingPoolTester>()
     }
