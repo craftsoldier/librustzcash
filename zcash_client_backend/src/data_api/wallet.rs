@@ -55,7 +55,8 @@ use crate::{
     },
     decrypt_transaction,
     fees::{
-        ChangeStrategy, DustOutputPolicy, StandardFeeRule, standard::SingleOutputChangeStrategy,
+        ChangeError, ChangeStrategy, DustOutputPolicy, StandardFeeRule,
+        standard::SingleOutputChangeStrategy,
     },
     proposal::{Proposal, ProposalError, Step, StepOutputIndex},
     util::Clock,
@@ -1098,6 +1099,288 @@ where
         lock_inputs,
         proposed_version,
     )
+}
+
+/// The maximum number of proposal-construction passes that
+/// [`propose_transfer_subtracting_fee`] will perform before concluding that the payment
+/// adjustment is not converging.
+///
+/// Each pass sets the payment to the requested amount less the fee observed in the
+/// previous pass. Because ZIP 317 fees change only at logical-action-count boundaries,
+/// in practice the payment converges within at most three passes; the cap exists as a
+/// guard against pathological wallet states (for example, inputs repeatedly crossing a
+/// dust threshold as the payment changes).
+const FEE_SUBTRACTION_MAX_PASSES: usize = 8;
+
+/// Proposes a transfer in which the transaction fee is deducted from the payment
+/// amount, rather than being paid on top of it.
+///
+/// The caller specifies the total amount of wallet value that the resulting
+/// transaction may consume (`amount`). Unlike [`propose_transfer`], where the requested
+/// payment is received in full and the fee is paid from additional inputs, the returned
+/// proposal instead reduces the payment so that, where possible,
+///
+/// ```text
+/// payment + fee == amount
+/// ```
+///
+/// exactly: the recipient receives `amount - fee`, and the total value consumed from the
+/// wallet (payment plus fee; change is returned to the wallet and so is not consumed)
+/// never exceeds `amount`. This makes the function suitable for "spend exactly this
+/// much" user flows, such as withdrawing a fixed balance or sweeping funds up to a
+/// budget cap.
+///
+/// The fee for a transaction is not knowable in advance: it depends upon which inputs
+/// the selector chooses, which in turn depends upon the payment amount. The function
+/// therefore constructs a sequence of proposals, each pass setting the payment to
+/// `amount` less the fee observed in the previous pass. The first pass uses the full
+/// `amount` as the payment, which also serves as a fee probe: if the wallet cannot
+/// cover the full amount plus the fee, the resulting
+/// [`Error::InsufficientFunds`] reports the required total, from which the fee is
+/// recovered and subtracted. Convergence is typical within two or three passes. If no
+/// proposal satisfies the invariant exactly — possible when the fee changes
+/// discontinuously as the payment changes, for example when an input or change output
+/// crosses a dust threshold — the largest proposal satisfying
+/// `payment + fee <= amount` is returned, and the difference between the total consumed
+/// and `amount` simply remains unspent in the wallet. The transaction never consumes
+/// more than `amount` in total.
+///
+/// Only transaction requests containing exactly one payment are supported: with more
+/// than one payment it is ambiguous which payment should absorb the fee. An error is
+/// returned for multi-payment requests (see
+/// [`ProposalError::FeeSubtractionRequiresSinglePayment`]).
+///
+/// When `lock_inputs` is `Some(request)`, the inputs selected by the *returned* proposal
+/// are locked under the same semantics as [`propose_transfer`]. Intermediate proposals
+/// constructed during convergence are never locked, so a failed call cannot leave
+/// abandoned locks behind. Note, however, that wallet state may change between passes:
+/// a concurrent proposal may lock an input selected by a later pass, in which case that
+/// pass fails with [`ProposalError::InputsLocked`] and the caller should retry, exactly
+/// as for [`propose_transfer`].
+///
+/// Parameters:
+/// * `wallet_db`: A read/write reference to the wallet database.
+/// * `params`: Consensus parameters.
+/// * `spend_from_account`: The unified account that controls the funds that will be
+///   spent in the resulting transaction.
+/// * `input_selector`: The input selector to use for note selection.
+/// * `change_strategy`: The change strategy to use for fee and change computation.
+/// * `request`: The transaction request. It must contain exactly one payment, whose
+///   amount is the total the transaction may consume (payment plus fee), not the amount
+///   the recipient will receive.
+/// * `confirmations_policy`: The minimum number of confirmations that a previously
+///   received note must have in the blockchain in order to be considered for being
+///   spent.
+/// * `spend_policy`: The policy constraining which pools inputs may be selected from.
+/// * `lock_inputs`: Locking request for the returned proposal's inputs, as for
+///   [`propose_transfer`].
+/// * `proposed_version`: The proposed transaction version, as for [`propose_transfer`].
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+pub fn propose_transfer_subtracting_fee<DbT, ParamsT, InputsT, ChangeT, CommitmentTreeErrT>(
+    wallet_db: &mut DbT,
+    params: &ParamsT,
+    spend_from_account: <DbT as InputSource>::AccountId,
+    input_selector: &InputsT,
+    change_strategy: &ChangeT,
+    request: zip321::TransactionRequest,
+    confirmations_policy: ConfirmationsPolicy,
+    spend_policy: &input_selection::SpendPolicy,
+    lock_inputs: Option<LockRequest>,
+    proposed_version: Option<TxVersion>,
+) -> Result<
+    Proposal<ChangeT::FeeRule, <DbT as InputSource>::NoteRef>,
+    ProposeTransferErrT<DbT, CommitmentTreeErrT, InputsT, ChangeT>,
+>
+where
+    DbT: WalletWrite + InputSource<Error = <DbT as WalletRead>::Error>,
+    <DbT as InputSource>::NoteRef: Copy + Eq + Ord,
+    ParamsT: consensus::Parameters + Clone,
+    InputsT: InputSelector<InputSource = DbT>,
+    ChangeT: ChangeStrategy<MetaSource = DbT>,
+{
+    // Fee subtraction is only defined for a single-payment request: with more than one
+    // payment it is ambiguous which payment should absorb the fee.
+    let source_payment = match request.payments().iter().collect::<Vec<_>>()[..] {
+        [(_, payment)] => payment,
+        _ => {
+            return Err(Error::Proposal(
+                ProposalError::FeeSubtractionRequiresSinglePayment(request.payments().len()),
+            ))
+        }
+    };
+    let recipient = source_payment.recipient_address().clone();
+    let gross = source_payment
+        .amount()
+        .ok_or_else(|| Error::Proposal(ProposalError::PaymentAmountMissing(0)))?;
+    let memo = source_payment.memo().cloned();
+    let label = source_payment.label().cloned();
+    let message = source_payment.message().cloned();
+    let other_params = source_payment.other_params().to_vec();
+    let gross = u64::from(gross);
+
+    let mut payment = gross;
+    let mut best: Option<Proposal<ChangeT::FeeRule, <DbT as InputSource>::NoteRef>> = None;
+    // Payments that have already been attempted, for cycle detection: if adjusting the
+    // payment revisits a previous value, the fee is oscillating and the best proposal
+    // found so far is returned instead.
+    let mut seen: Vec<u64> = vec![gross];
+
+    for _pass in 0..FEE_SUBTRACTION_MAX_PASSES {
+        let payment_zats = Zatoshis::from_u64(payment)
+            .map_err(|_| Error::Proposal(ProposalError::RequestTotalInvalid))?;
+        let request_payment = Payment::new(
+            recipient.clone(),
+            Some(payment_zats),
+            memo.clone(),
+            label.clone(),
+            message.clone(),
+            other_params.clone(),
+        )
+        .map_err(Error::Payment)?;
+        let request = zip321::TransactionRequest::new(vec![request_payment])
+            .map_err(ProposalError::Zip321)
+            .map_err(Error::Proposal)?;
+
+        match propose_transfer(
+            wallet_db,
+            params,
+            spend_from_account,
+            input_selector,
+            change_strategy,
+            request,
+            confirmations_policy,
+            spend_policy,
+            // Intermediate proposals are never locked: a pass that a later correction
+            // supersedes must not leave abandoned locks behind. Only the proposal that
+            // is finally returned is locked, below.
+            None,
+            proposed_version,
+        ) {
+            Ok(proposal) => {
+                let fee: u64 = proposal
+                    .steps()
+                    .iter()
+                    .map(|step| u64::from(step.balance().fee_required()))
+                    .sum();
+                let spent = payment + fee;
+                if spent == gross {
+                    // Exact: this proposal consumes precisely the requested total.
+                    best = Some(proposal);
+                    break;
+                } else if spent < gross {
+                    // The fee is smaller than the previous pass accounted for, so the
+                    // payment can grow. Retain this proposal as the best-so-far
+                    // undershoot in case a later pass cannot better it.
+                    best = Some(proposal);
+                    let next = gross - fee;
+                    debug_assert!(next > payment, "undershoot implies a larger payment");
+                    if next <= payment || seen.contains(&next) {
+                        break;
+                    }
+                    seen.push(next);
+                    payment = next;
+                } else {
+                    // The fee grew as the payment changed (for example, an input
+                    // crossed a dust threshold and the selector chose a different
+                    // set). If an undershooting proposal has already been found, the
+                    // fee is oscillating: return it rather than chase the exact
+                    // invariant.
+                    if best.is_some() {
+                        break;
+                    }
+                    if fee >= gross {
+                        // The fee consumes the entire requested total; no positive
+                        // payment remains.
+                        return Err(Error::Proposal(ProposalError::FeeExceedsPayment {
+                            amount: Zatoshis::from_u64(gross)
+                                .expect("gross was converted from a valid Zatoshis"),
+                            fee_required: Zatoshis::from_u64(fee)
+                                .expect("fee was converted from a valid Zatoshis"),
+                        }));
+                    }
+                    let next = gross - fee;
+                    if next >= payment || seen.contains(&next) {
+                        break;
+                    }
+                    seen.push(next);
+                    payment = next;
+                }
+            }
+            Err(e) => {
+                if let Error::InsufficientFunds { available, required } = &e {
+                    let available = u64::from(*available);
+                    let required = u64::from(*required);
+                    if available < gross {
+                        // The spendable value in the permitted pools cannot cover the
+                        // requested total at all; this is a genuine insufficiency.
+                        return Err(e);
+                    }
+                    if best.is_some() {
+                        // A larger payment was attempted after a valid proposal was
+                        // found, but the wallet could not cover it; the best proposal
+                        // stands.
+                        break;
+                    }
+                    // The wallet can cover the requested total, but not the current
+                    // payment plus its fee. `required` includes the fee for the
+                    // attempted shape, so the payment can be corrected directly.
+                    let fee = required.saturating_sub(payment);
+                    if fee >= gross {
+                        // The fee consumes the entire requested total; no positive
+                        // payment remains.
+                        return Err(Error::Proposal(ProposalError::FeeExceedsPayment {
+                            amount: Zatoshis::from_u64(gross)
+                                .expect("gross was converted from a valid Zatoshis"),
+                            fee_required: Zatoshis::from_u64(fee)
+                                .expect("fee was converted from a valid Zatoshis"),
+                        }));
+                    }
+                    let next = gross - fee;
+                    if next >= payment || seen.contains(&next) {
+                        return Err(e);
+                    }
+                    seen.push(next);
+                    payment = next;
+                } else if best.is_some()
+                    && matches!(&e, Error::Change(ChangeError::DustInputs { .. }))
+                {
+                    // The adjusted payment made an input or change output cross a dust
+                    // threshold; the best undershooting proposal is preferable to
+                    // failing outright.
+                    break;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    let proposal = match best {
+        Some(proposal) => proposal,
+        None => {
+            return Err(Error::Proposal(ProposalError::FeeSubtractionDidNotConverge {
+                amount: Zatoshis::from_u64(gross)
+                    .expect("gross was converted from a valid Zatoshis"),
+            }))
+        }
+    };
+
+    // Lock the returned proposal's inputs, mirroring `propose_transfer`. Intermediate
+    // proposals were never locked, so there are no abandoned locks to release.
+    if let Some(request) = lock_inputs {
+        let maybe_heights = wallet_db
+            .get_target_and_anchor_heights(confirmations_policy.trusted())
+            .map_err(InputSelectorError::DataSource)
+            .map_err(Error::from)?;
+        let (target_height, _) = maybe_heights
+            .ok_or_else(|| InputSelectorError::SyncRequired)
+            .map_err(Error::from)?;
+        let lock_expiry_height = target_height + request.for_blocks();
+        lock_proposal_inputs(wallet_db, &proposal, request.owner(), lock_expiry_height)?;
+    }
+
+    Ok(proposal)
 }
 
 /// Proposes spending the maximum available value from the given shielded pools, sending it

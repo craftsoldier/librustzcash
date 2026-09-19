@@ -396,6 +396,248 @@ pub fn send_single_step_proposed_transfer<T: ShieldedPoolTester>(
     );
 }
 
+/// A payment of the wallet's entire spendable balance, with the fee subtracted from
+/// the payment, converges to a proposal that consumes exactly the requested total —
+/// even though the wallet cannot cover the full amount *plus* the fee.
+///
+/// This is the flagship case for fee-subtracted proposals: the wallet holds a single
+/// note worth the entire requested amount, so the first pass (at the full amount as
+/// the payment) cannot be funded, and the fee must be recovered from the resulting
+/// `InsufficientFunds` error and subtracted.
+pub fn subtract_fee_spends_exact_balance<T: ShieldedPoolTester>(
+    dsf: impl DataStoreFactory,
+    cache: impl TestCache,
+) {
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+
+    // Fund the wallet with a single note and request its entire value as the total
+    // the transaction may consume.
+    st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(60000));
+
+    let to_extsk = T::sk(&[0xf5; 32]);
+    let to: Address = T::sk_default_address(&to_extsk);
+    let gross = Zatoshis::const_from_u64(60000);
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(st.network()),
+        gross,
+    )])
+    .unwrap();
+
+    let change_memo = "Test change memo".parse::<Memo>().unwrap();
+    let change_strategy = standard::SingleOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        Some(change_memo.into()),
+        T::SHIELDED_PROTOCOL,
+        DustOutputPolicy::default(),
+    );
+    let input_selector = GreedyInputSelector::new();
+
+    let account = st.test_account().cloned().unwrap();
+    let proposal = st
+        .propose_transfer_subtracting_fee(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+
+    // The balance invariant holds exactly: payment + fee == the requested total.
+    let step = proposal.steps().first();
+    let payment = step
+        .transaction_request()
+        .total()
+        .unwrap()
+        .expect("the adjusted payment amount is present");
+    let fee = step.balance().fee_required();
+    assert_eq!(payment + fee, Some(gross));
+    assert!(u64::from(payment) > 0, "the recipient must receive something");
+
+    // The proposal is executable end to end.
+    st.create_proposed_expecting(&proposal, 1);
+}
+
+/// With ample funds available, a fee-subtracted payment converges to the exact
+/// invariant, with the unspent remainder returned to the wallet as change.
+pub fn subtract_fee_with_ample_funds<T: ShieldedPoolTester>(
+    dsf: impl DataStoreFactory,
+    cache: impl TestCache,
+) {
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+
+    // Fund the wallet well beyond the requested total.
+    st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(100000));
+
+    let to_extsk = T::sk(&[0xf5; 32]);
+    let to: Address = T::sk_default_address(&to_extsk);
+    let gross = Zatoshis::const_from_u64(50000);
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(st.network()),
+        gross,
+    )])
+    .unwrap();
+
+    let change_memo = "Test change memo".parse::<Memo>().unwrap();
+    let change_strategy = standard::SingleOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        Some(change_memo.into()),
+        T::SHIELDED_PROTOCOL,
+        DustOutputPolicy::default(),
+    );
+    let input_selector = GreedyInputSelector::new();
+
+    let account = st.test_account().cloned().unwrap();
+    let proposal = st
+        .propose_transfer_subtracting_fee(
+            account.id(),
+            &input_selector,
+            &change_strategy,
+            request,
+            ConfirmationsPolicy::MIN,
+        )
+        .unwrap();
+
+    // The balance invariant holds exactly: payment + fee == the requested total.
+    let step = proposal.steps().first();
+    let payment = step
+        .transaction_request()
+        .total()
+        .unwrap()
+        .expect("the adjusted payment amount is present");
+    let fee = step.balance().fee_required();
+    assert_eq!(payment + fee, Some(gross));
+
+    // The unspent remainder returns to the wallet as change.
+    assert_eq!(step.balance().proposed_change().len(), 1);
+
+    // The proposal is executable end to end.
+    st.create_proposed_expecting(&proposal, 1);
+}
+
+/// Fee subtraction is only defined for single-payment requests; a multi-payment
+/// request is rejected rather than guessing which payment should absorb the fee.
+pub fn subtract_fee_rejects_multi_payment_request<T: ShieldedPoolTester>(
+    dsf: impl DataStoreFactory,
+    cache: impl TestCache,
+) {
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+
+    let to_a: Address = T::sk_default_address(&T::sk(&[0xf5; 32]));
+    let to_b: Address = T::sk_default_address(&T::sk(&[0xf6; 32]));
+    let request = TransactionRequest::new(vec![
+        Payment::without_memo(to_a.to_zcash_address(st.network()), Zatoshis::const_from_u64(10000)),
+        Payment::without_memo(to_b.to_zcash_address(st.network()), Zatoshis::const_from_u64(20000)),
+    ])
+    .unwrap();
+
+    let change_strategy = standard::SingleOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        None,
+        T::SHIELDED_PROTOCOL,
+        DustOutputPolicy::default(),
+    );
+    let input_selector = GreedyInputSelector::new();
+
+    let account = st.test_account().cloned().unwrap();
+    let result = st.propose_transfer_subtracting_fee(
+        account.id(),
+        &input_selector,
+        &change_strategy,
+        request,
+        ConfirmationsPolicy::MIN,
+    );
+
+    assert_matches!(
+        result,
+        Err(Error::Proposal(
+            crate::proposal::ProposalError::FeeSubtractionRequiresSinglePayment(2)
+        ))
+    );
+}
+
+/// A requested total smaller than the fee even for the smallest transaction shape is
+/// rejected: no positive payment remains after the fee is subtracted.
+pub fn subtract_fee_rejects_amount_below_fee<T: ShieldedPoolTester>(
+    dsf: impl DataStoreFactory,
+    cache: impl TestCache,
+) {
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+
+    // Fund the wallet so that funding is not the failure mode.
+    st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(60000));
+
+    let to: Address = T::sk_default_address(&T::sk(&[0xf5; 32]));
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(st.network()),
+        // Less than the minimum ZIP 317 fee.
+        Zatoshis::const_from_u64(5000),
+    )])
+    .unwrap();
+
+    let change_strategy = standard::SingleOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        None,
+        T::SHIELDED_PROTOCOL,
+        DustOutputPolicy::default(),
+    );
+    let input_selector = GreedyInputSelector::new();
+
+    let account = st.test_account().cloned().unwrap();
+    let result = st.propose_transfer_subtracting_fee(
+        account.id(),
+        &input_selector,
+        &change_strategy,
+        request,
+        ConfirmationsPolicy::MIN,
+    );
+
+    assert_matches!(
+        result,
+        Err(Error::Proposal(
+            crate::proposal::ProposalError::FeeExceedsPayment { .. }
+        ))
+    );
+}
+
+/// A requested total exceeding the wallet's entire spendable balance propagates the
+/// underlying `InsufficientFunds` error rather than being misreported as a fee
+/// problem.
+pub fn subtract_fee_propagates_insufficient_funds<T: ShieldedPoolTester>(
+    dsf: impl DataStoreFactory,
+    cache: impl TestCache,
+) {
+    let mut st = TestDsl::with_sapling_birthday_account(dsf, cache).build::<T>();
+
+    st.add_a_single_note_checking_balance(Zatoshis::const_from_u64(10000));
+
+    let to: Address = T::sk_default_address(&T::sk(&[0xf5; 32]));
+    let request = TransactionRequest::new(vec![Payment::without_memo(
+        to.to_zcash_address(st.network()),
+        Zatoshis::const_from_u64(60000),
+    )])
+    .unwrap();
+
+    let change_strategy = standard::SingleOutputChangeStrategy::new(
+        StandardFeeRule::Zip317,
+        None,
+        T::SHIELDED_PROTOCOL,
+        DustOutputPolicy::default(),
+    );
+    let input_selector = GreedyInputSelector::new();
+
+    let account = st.test_account().cloned().unwrap();
+    let result = st.propose_transfer_subtracting_fee(
+        account.id(),
+        &input_selector,
+        &change_strategy,
+        request,
+        ConfirmationsPolicy::MIN,
+    );
+
+    assert_matches!(result, Err(Error::InsufficientFunds { .. }));
+}
+
 /// Builds a real transaction via the proposal/creation path, assembles it into a full
 /// block, and verifies that [`decrypt_block`] followed by [`scan_block`] detects the
 /// wallet output (the change note) that it contains.

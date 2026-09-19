@@ -98,6 +98,7 @@ use super::{
             GreedyInputSelector, InputSelector, LockFilter, LockedInputPolicy, SpendPolicy,
         },
         propose_send_max_transfer, propose_standard_transfer_to_address, propose_transfer,
+        propose_transfer_subtracting_fee,
     },
 };
 
@@ -1239,6 +1240,38 @@ where
     {
         let network = self.network().clone();
         propose_transfer::<_, _, _, _, Infallible>(
+            self.wallet_mut(),
+            &network,
+            spend_from_account,
+            input_selector,
+            change_strategy,
+            request,
+            confirmations_policy,
+            &SpendPolicy::default(),
+            None,
+            None,
+        )
+    }
+
+    /// Invokes [`propose_transfer_subtracting_fee`] with the given arguments.
+    #[allow(clippy::type_complexity)]
+    pub fn propose_transfer_subtracting_fee<InputsT, ChangeT>(
+        &mut self,
+        spend_from_account: <DbT as InputSource>::AccountId,
+        input_selector: &InputsT,
+        change_strategy: &ChangeT,
+        request: zip321::TransactionRequest,
+        confirmations_policy: ConfirmationsPolicy,
+    ) -> Result<
+        Proposal<ChangeT::FeeRule, <DbT as InputSource>::NoteRef>,
+        super::wallet::ProposeTransferErrT<DbT, Infallible, InputsT, ChangeT>,
+    >
+    where
+        InputsT: InputSelector<InputSource = DbT>,
+        ChangeT: ChangeStrategy<MetaSource = DbT>,
+    {
+        let network = self.network().clone();
+        propose_transfer_subtracting_fee::<_, _, _, _, Infallible>(
             self.wallet_mut(),
             &network,
             spend_from_account,
